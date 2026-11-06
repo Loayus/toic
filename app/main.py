@@ -23,7 +23,10 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="API QCM TOEIC",
-    description="Entraînement au TOEIC Reading (parties 5, 6 et 7). Données fictives.",
+    description=(
+        "Entraînement au TOEIC Reading (parties 5, 6 et 7) avec des questions de style "
+        "TOEIC sous licence ouverte. Ce ne sont pas des questions officielles d'ETS."
+    ),
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -31,10 +34,45 @@ app = FastAPI(
 Db = Annotated[Session, Depends(get_db)]
 
 POINTS_PER_QUESTION = 4.95  # 495 points pour les 100 questions du Reading
+EXAM_QUESTION_COUNT = 100
+EXAM_QUOTAS = {5: 30, 6: 16, 7: 54}
+# Comme au vrai test : 4 questions par texte en partie 6, au moins 2 en partie 7.
+EXAM_MIN_GROUP_SIZES = {5: 1, 6: 4, 7: 2}
+EXAM_DRAW_ATTEMPTS = 200
 
 
 def _points(question_count: int) -> float:
     return round(question_count * POINTS_PER_QUESTION, 2)
+
+
+def _fill_quota(groups: list[list], quota: int) -> list | None:
+    """Prend des groupes entiers au hasard jusqu'à atteindre exactement le quota."""
+    for _ in range(EXAM_DRAW_ATTEMPTS):
+        random.shuffle(groups)
+        picked: list = []
+        for group in groups:
+            if len(picked) + len(group) <= quota:
+                picked += group
+            if len(picked) == quota:
+                return picked
+    return None
+
+
+def _draw_exam(candidates: list) -> list | None:
+    """Tire un examen réparti comme le vrai test, sans couper les textes."""
+    exam: list = []
+    for part, quota in EXAM_QUOTAS.items():
+        groups: dict[int, list] = {}
+        for row in candidates:
+            if row.part == part:
+                key = row.passage_id if row.passage_id else -row.id
+                groups.setdefault(key, []).append(row)
+        usable = [g for g in groups.values() if len(g) >= EXAM_MIN_GROUP_SIZES[part]]
+        picked = _fill_quota(usable, quota)
+        if picked is None:
+            return None
+        exam += picked
+    return exam
 
 
 def _filters(part: int | None, category: str | None, difficulty: str | None) -> list:
@@ -170,21 +208,30 @@ def check_question(question_id: int, payload: schemas.CheckRequest, db: Db):
 def create_session(db: Db, payload: schemas.SessionCreate | None = None):
     """Tire des questions au hasard, dans la limite de celles disponibles.
 
-    Comme au vrai TOEIC, elles sont classées par partie, et les questions d'un
-    même texte se suivent.
+    Sans filtre, une session de 100 questions est un examen complet : 30 questions de
+    partie 5, 16 de partie 6 et 54 de partie 7, avec des textes entiers.
+
+    Comme au vrai TOEIC, les questions sont classées par partie, et celles d'un même
+    texte se suivent dans l'ordre.
     """
     payload = payload or schemas.SessionCreate()
     conditions = _filters(payload.part, payload.category, payload.difficulty)
     candidates = db.execute(
-        select(Question.id, Question.part, Question.passage_id).where(*conditions)
+        select(Question.id, Question.part, Question.passage_id)
+        .where(*conditions)
+        .order_by(Question.id)
     ).all()
     if not candidates:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "Aucune question ne correspond à ces critères."
         )
 
-    picked = random.sample(candidates, min(payload.question_count, len(candidates)))
-    picked.sort(key=lambda row: (row.part, row.passage_id or 0))
+    picked = None
+    if not conditions and payload.question_count == EXAM_QUESTION_COUNT:
+        picked = _draw_exam(candidates)
+    if picked is None:
+        picked = random.sample(candidates, min(payload.question_count, len(candidates)))
+    picked.sort(key=lambda r: (r.part, r.passage_id or 0, r.id if r.passage_id else 0))
 
     session = PracticeSession(
         items=[
