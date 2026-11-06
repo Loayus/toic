@@ -28,6 +28,7 @@ class QuestionOut(BaseModel):
     difficulty: Difficulty
     prompt: str
     options: dict[Choice, str]
+    source: str
     passage: PassageOut | None
 
 

@@ -27,6 +27,7 @@ class Question(Base):
     options: Mapped[dict[str, str]] = mapped_column(JSON)
     correct_choice: Mapped[str] = mapped_column(String(1))
     explanation: Mapped[str]
+    source: Mapped[str] = mapped_column(String(100))
     passage_id: Mapped[int | None] = mapped_column(ForeignKey("passages.id"))
 
     passage: Mapped[Passage | None] = relationship()

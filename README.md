@@ -2,7 +2,7 @@
 
 API REST pour s'entraîner au TOEIC Reading (parties 5, 6 et 7), avec FastAPI et SQLite. L'examen complet compte 100 questions, notées sur 495. La partie Listening n'est volontairement pas couverte.
 
-> Les questions sont **fictives** et ont été écrites pour le développement. Elles ne proviennent pas d'un vrai test TOEIC.
+> La base contient plus de 1000 questions **de style TOEIC** sous licence ouverte. Ce ne sont pas des questions officielles d'ETS. Voir [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Démarrage
 
@@ -58,7 +58,9 @@ curl localhost:8000/sessions/1/results
 
 ## Règles
 
-- Une session contient au maximum `question_count` questions : moins si le filtre en trouve moins.
+- Sans filtre, une session de 100 questions est un examen complet : 30 questions de partie 5, 16 de partie 6 et 54 de partie 7, avec des textes entiers.
+- Une autre session contient au maximum `question_count` questions tirées une à une : moins si le filtre en trouve moins, et un texte peut n'y apparaître qu'avec une partie de ses questions.
+- Toutes les corrections sont en français.
 - Chaque question accepte une seule réponse (A, B, C ou D), qui ne peut pas être modifiée : une seconde tentative renvoie `409`.
 - Chaque bonne réponse vaut 4,95 points. Une réponse fausse ou absente vaut 0 point.
 - `score` est la note obtenue et `max_score` la note maximale de la session : 495 pour 100 questions, 49,5 pour 10 questions.
@@ -70,6 +72,6 @@ curl localhost:8000/sessions/1/results
 pytest
 ```
 
-## Remplacer les données fictives
+## Mettre à jour les questions
 
-Les questions se trouvent dans `app/seed.py`. Elles ne sont chargées que si la base est vide : après une modification, supprimez `toeic.db` (cela efface aussi l'historique des sessions).
+Les questions se trouvent dans `data/questions.json`, généré par `scripts/build_questions.py` à partir des sources et des traductions de `data/explanations_fr.json`. Elles ne sont chargées que si la base est vide : après une modification, supprimez `toeic.db` (cela efface aussi l'historique des sessions).

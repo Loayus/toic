@@ -1,3 +1,6 @@
+import re
+from collections import Counter
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -7,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models import Question
-from app.seed import seed_if_empty
+from app.seed import DATA_FILE, seed_if_empty
 
 
 @pytest.fixture
@@ -46,16 +49,41 @@ def wrong_choice(db_factory, question_id: int) -> str:
 def test_seed_data_is_well_formed(db_factory):
     with db_factory() as db:
         questions = db.scalars(select(Question)).all()
-    parts = [q.part for q in questions]
-    assert (parts.count(5), parts.count(6), parts.count(7)) == (30, 16, 54)
+    assert len(questions) >= 1000
+    assert {q.part for q in questions} == {5, 6, 7}
     part_5_prompts = [q.prompt for q in questions if q.part == 5]
-    assert len(set(part_5_prompts)) == 30
+    assert len(set(part_5_prompts)) == len(part_5_prompts)
     for q in questions:
         assert sorted(q.options) == ["A", "B", "C", "D"]
         assert len(set(q.options.values())) == 4
         assert q.correct_choice in q.options
         assert q.explanation
+        assert q.source
         assert (q.passage_id is None) == (q.part == 5)
+
+
+def test_explanations_are_in_french_and_do_not_cite_shuffled_letters(db_factory):
+    with db_factory() as db:
+        explanations = db.scalars(select(Question.explanation)).all()
+    chinese = re.compile(r"[一-鿿]")
+    letter = re.compile(r"\b(?:réponse|choix|option|proposition) [A-D]\b|^[A-D]\b(?!['’])")
+    assert not [text for text in explanations if chinese.search(text)]
+    assert not [text for text in explanations if letter.search(text)]
+
+
+def test_correct_answers_are_evenly_spread(db_factory):
+    """La source met presque toujours la bonne réponse en A : l'import doit corriger ça."""
+    with db_factory() as db:
+        questions = db.scalars(select(Question)).all()
+    for letter in "ABCD":
+        share = sum(q.correct_choice == letter for q in questions) / len(questions)
+        assert 0.2 < share < 0.3, (letter, share)
+
+
+def test_excluded_third_party_questions_are_absent():
+    content = DATA_FILE.read_text(encoding="utf-8")
+    assert "P5-E0" not in content  # questions d'ESL Lounge présentes dans le dépôt source
+    assert "The factory implemented ______ measures" not in content
 
 
 def test_seed_is_idempotent(db_factory):
@@ -115,8 +143,14 @@ def test_session_respects_filters_and_has_no_duplicates(client):
 
 
 def test_session_is_capped_at_available_questions(client):
-    available = client.get("/questions", params={"part": 6}).json()["total"]
-    session = client.post("/sessions", json={"part": 6, "question_count": 100}).json()
+    combinations = (
+        {"part": part, "difficulty": difficulty}
+        for part in (5, 6, 7)
+        for difficulty in ("easy", "medium", "hard")
+    )
+    totals = ((f, client.get("/questions", params=f).json()["total"]) for f in combinations)
+    filters, available = next((f, total) for f, total in totals if 0 < total < 100)
+    session = client.post("/sessions", json={**filters, "question_count": 100}).json()
     assert session["total"] == available
 
 
@@ -126,9 +160,34 @@ def test_session_orders_by_part_and_groups_passages(client):
     parts = [q["part"] for q in questions]
     assert parts == sorted(parts)
 
-    passage_ids = [q["passage"]["id"] for q in questions if q["passage"]]
-    assert passage_ids == sorted(passage_ids)
+    for part in (6, 7):
+        passage_ids = [q["passage"]["id"] for q in questions if q["part"] == part]
+        assert passage_ids == sorted(passage_ids)
 
+
+def test_partial_session_keeps_passage_questions_in_order(client):
+    session = client.post("/sessions", json={"part": 6, "question_count": 60}).json()
+    by_passage: dict[int, list[int]] = {}
+    for item in session["questions"]:
+        question = item["question"]
+        by_passage.setdefault(question["passage"]["id"], []).append(question["id"])
+    assert all(ids == sorted(ids) for ids in by_passage.values())
+
+
+def test_full_exam_has_whole_passages_in_the_official_layout(client, db_factory):
+    for _ in range(5):
+        session = client.post("/sessions").json()
+        questions = [item["question"] for item in session["questions"]]
+        parts = [q["part"] for q in questions]
+        assert (parts.count(5), parts.count(6), parts.count(7)) == (30, 16, 54)
+        assert len({q["id"] for q in questions}) == 100
+
+        with db_factory() as db:
+            sizes = Counter(db.scalars(select(Question.passage_id)).all())
+        drawn = Counter(q["passage"]["id"] for q in questions if q["passage"])
+        assert drawn == {passage_id: sizes[passage_id] for passage_id in drawn}
+        part_6_sizes = Counter(q["passage"]["id"] for q in questions if q["part"] == 6)
+        assert set(part_6_sizes.values()) == {4}
 
 def test_session_without_matching_question(client):
     response = client.post(
